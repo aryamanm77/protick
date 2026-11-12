@@ -9,6 +9,7 @@ import com.yourorg.qbank.core.importer.RawRow;
 import com.yourorg.qbank.core.importer.RawSheetData;
 import com.yourorg.qbank.core.model.EncryptedMcq;
 import com.yourorg.qbank.core.model.ModuleStatus;
+import com.yourorg.qbank.core.model.ModuleUnit;
 import com.yourorg.qbank.core.model.Subject;
 import com.yourorg.qbank.core.security.QBankAad;
 import com.yourorg.qbank.core.service.CoreImportService;
@@ -143,5 +144,35 @@ class AutoShuffleImportTest {
         byte[] mod1 = fx.spreadsheetPort.stageWorkbook("reimport.xlsx", List.of(InMemoryQBankFixture.makeSingleModuleSheet("Module 1", 1, 20)));
         ImportPreviewResult p2 = fx.importService.previewSingleModule(subj.id(), 1, mod1, "reimport.xlsx");
         assertThrows(ConflictException.class, () -> fx.importService.confirmPreview(p2.previewId()));
+    }
+
+    @Test
+    void halfModuleSheetNamesParseAndAssignPartSpecificIds() {
+        assertEquals(Integer.valueOf(1), ModuleUnit.parseSheetUnit("Module 1"));
+        assertEquals(Integer.valueOf(21), ModuleUnit.parseSheetUnit("Module 2A"));
+        assertEquals(Integer.valueOf(21), ModuleUnit.parseSheetUnit("Module 2 (1st Half)"));
+        assertEquals(Integer.valueOf(32), ModuleUnit.parseSheetUnit("Module 3 Part 2"));
+        assertEquals(Integer.valueOf(42), ModuleUnit.parseSheetUnit("M4.2"));
+        assertEquals(Integer.valueOf(52), ModuleUnit.parseSheetUnit("M5B"));
+        assertFalse(ModuleUnit.overlaps(21, 22));
+        assertTrue(ModuleUnit.overlaps(2, 21));
+        assertTrue(ModuleUnit.overlaps(21, 2));
+
+        InMemoryQBankFixture fx = new InMemoryQBankFixture();
+        fx.asAdmin("admin1");
+        Subject subj = fx.subjectService.createSubject("CS209", "HalfBank", 120, 1);
+
+        fx.asHod("hod1");
+        byte[] bytes = fx.spreadsheetPort.stageWorkbook("m2a.xlsx", List.of(InMemoryQBankFixture.makeSingleModuleSheet("Module 2 Part 1", 21, 15)));
+        ImportPreviewResult prev = fx.importService.previewSingleModule(subj.id(), 21, bytes, "m2a.xlsx");
+        assertEquals(60, prev.expectedCount());
+        assertEquals(15, prev.validCount());
+        fx.importService.confirmPreview(prev.previewId());
+
+        List<EncryptedMcq> stored = fx.mcqRepo.findBySubjectAndModule(subj.id(), 21);
+        assertEquals(15, stored.size());
+        assertEquals("CS209-M2A-001", stored.get(0).id());
+        String decrypted = fx.crypto.decrypt(stored.get(0).textEnc(), QBankAad.mcqText(subj.id(), 21, stored.get(0).id()));
+        assertFalse(decrypted.isBlank());
     }
 }

@@ -4,6 +4,7 @@ import com.yourorg.qbank.core.exception.BadRequestException;
 import com.yourorg.qbank.core.model.AnswerKeyEntry;
 import com.yourorg.qbank.core.model.GeneratedSetData;
 import com.yourorg.qbank.core.model.GeneratedVersionData;
+import com.yourorg.qbank.core.model.ModuleUnit;
 import com.yourorg.qbank.core.model.PlainMcq;
 import com.yourorg.qbank.core.model.VersionQuestionSnapshot;
 import com.yourorg.qbank.core.port.RandomPort;
@@ -41,8 +42,8 @@ public class PaperSetVersionGenerator {
             if (modulePool.size() < requiredTotal) {
                 throw new BadRequestException(String.format(
                         Locale.ROOT,
-                        "Module %d has %d questions, needs %d. Add questions or pick fewer modules.",
-                        modNum, modulePool.size(), requiredTotal));
+                        "%s has %d questions, needs %d. Add questions or pick fewer modules.",
+                        ModuleUnit.displayName(modNum), modulePool.size(), requiredTotal));
             }
 
             List<PlainMcq> shuffledPool = new ArrayList<>(modulePool);
@@ -100,8 +101,8 @@ public class PaperSetVersionGenerator {
             if (unused.size() < needed) {
                 throw new BadRequestException(String.format(
                         Locale.ROOT,
-                        "Module %d has %d unused questions after Morning session, needs %d. Add questions or pick fewer modules.",
-                        modNum, unused.size(), needed));
+                        "%s has %d unused questions after Morning session, needs %d. Add questions or pick fewer modules.",
+                        ModuleUnit.displayName(modNum), unused.size(), needed));
             }
 
             List<PlainMcq> shuffled = new ArrayList<>(unused);

@@ -17,6 +17,7 @@ import com.yourorg.qbank.core.model.EncryptedPayload;
 import com.yourorg.qbank.core.model.ExamSession;
 import com.yourorg.qbank.core.model.ImportPreviewRecord;
 import com.yourorg.qbank.core.model.ModuleStatus;
+import com.yourorg.qbank.core.model.ModuleUnit;
 import com.yourorg.qbank.core.model.PlainMcq;
 import com.yourorg.qbank.core.model.Subject;
 import com.yourorg.qbank.core.model.SubjectModule;
@@ -43,8 +44,6 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /**
  * HOD-only import workflow:
@@ -55,7 +54,6 @@ import java.util.regex.Pattern;
  */
 public class CoreImportService {
 
-    private static final Pattern MODULE_SHEET_NAME = Pattern.compile("^(?i)(?:module|mod|m)[\\s_-]*([1-5])$");
     private static final int DEFAULT_MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
 
     private final SubjectRepository subjectRepository;
@@ -154,7 +152,7 @@ public class CoreImportService {
                 actor.username(),
                 AuthGuard.primaryRoleName(actor),
                 "MODULE",
-                subject.code() + "-M" + moduleNumber,
+                subject.code() + "-" + ModuleUnit.shortCode(moduleNumber),
                 jsonCodec.toJson(Map.of(
                         "previewId", result.previewId(),
                         "totalRows", result.totalRows(),
@@ -180,7 +178,7 @@ public class CoreImportService {
             }
         }
         if (results.isEmpty()) {
-            throw new BadRequestException("No sheets named 'Module 1'..'Module 5' found in workbook");
+            throw new BadRequestException("No module sheets (e.g. 'Module 1'..'Module 5', 'Module 1A', 'Module 1B') found in workbook");
         }
         auditPort.append(
                 "IMPORT_MULTIMODULE_PREVIEW_CREATED",
@@ -235,11 +233,12 @@ public class CoreImportService {
             }
         }
 
+        int expectedForUnit = ModuleUnit.expectedCount(current.moduleNumber(), subject.expectedQuestionsPerModule());
         Validator.ValidationSummary summary = importPipeline.revalidateRows(
                 current.sheetName(),
                 updatedRows,
                 current.columnDetection(),
-                subject.expectedQuestionsPerModule()
+                expectedForUnit
         );
         ImportPreviewResult refreshed = new ImportPreviewResult(
                 current.previewId(),
@@ -255,7 +254,7 @@ public class CoreImportService {
                 summary.errorCount(),
                 summary.duplicateSkippedCount(),
                 summary.excludedCount(),
-                subject.expectedQuestionsPerModule(),
+                expectedForUnit,
                 summary.validCount() > 0 && summary.errorCount() == 0,
                 summary.issues(),
                 updatedRows
@@ -272,11 +271,12 @@ public class CoreImportService {
         ImportPreviewResult preview = decryptPreview(rec);
         Subject subject = requireActiveSubject(preview.subjectId());
 
+        int expectedForUnit = ModuleUnit.expectedCount(preview.moduleNumber(), subject.expectedQuestionsPerModule());
         Validator.ValidationSummary summary = importPipeline.revalidateRows(
                 preview.sheetName(),
                 preview.rows(),
                 preview.columnDetection(),
-                subject.expectedQuestionsPerModule()
+                expectedForUnit
         );
         if (summary.errorCount() > 0) {
             throw new BadRequestException("Cannot confirm import with " + summary.errorCount() + " row error(s). Fix or exclude bad rows first.");
@@ -288,7 +288,7 @@ public class CoreImportService {
         List<ExamSession> blocking = examRepository.findFrozenOrLiveSessionsUsingModule(subject.id(), preview.moduleNumber());
         if (!blocking.isEmpty()) {
             throw new ConflictException(
-                    "Module " + preview.moduleNumber() + " is locked by a FROZEN or LIVE exam session (" + blocking.get(0).sessionSlot() + ")");
+                    ModuleUnit.displayName(preview.moduleNumber()) + " is locked by a FROZEN or LIVE exam session (" + blocking.get(0).sessionSlot() + ")");
         }
 
         Instant now = clockPort.now();
@@ -323,6 +323,14 @@ public class CoreImportService {
 
             mcqRepository.replaceModuleMcqs(subject.id(), preview.moduleNumber(), encryptedMcqs);
 
+            // Keep Full vs Half representation unambiguous for each module when not frozen
+            if (ModuleUnit.isFull(preview.moduleNumber())) {
+                clearUnitIfPopulated(subject.id(), ModuleUnit.firstHalf(preview.moduleNumber()));
+                clearUnitIfPopulated(subject.id(), ModuleUnit.secondHalf(preview.moduleNumber()));
+            } else {
+                clearUnitIfPopulated(subject.id(), ModuleUnit.baseModule(preview.moduleNumber()));
+            }
+
             SubjectModule existingMod = moduleRepository.findBySubjectAndNumber(subject.id(), preview.moduleNumber()).orElse(null);
             moduleRepository.save(new SubjectModule(
                     existingMod == null ? null : existingMod.id(),
@@ -346,7 +354,7 @@ public class CoreImportService {
                     actor.username(),
                     AuthGuard.primaryRoleName(actor),
                     "MODULE",
-                    subject.code() + "-M" + preview.moduleNumber(),
+                    subject.code() + "-" + ModuleUnit.shortCode(preview.moduleNumber()),
                     jsonCodec.toJson(Map.of(
                             "questionCount", encryptedMcqs.size(),
                             "warningCount", summary.warningCount(),
@@ -386,6 +394,7 @@ public class CoreImportService {
             AuthPort.AuthActor actor
     ) {
         String previewId = randomPort.randomUuid();
+        int expectedForUnit = ModuleUnit.expectedCount(moduleNumber, subject.expectedQuestionsPerModule());
         ImportPreviewResult result = importPipeline.preview(
                 previewId,
                 subject.id(),
@@ -393,7 +402,7 @@ public class CoreImportService {
                 moduleNumber,
                 filename == null ? "upload.xlsx" : filename,
                 sheet,
-                subject.expectedQuestionsPerModule()
+                expectedForUnit
         );
         Instant now = clockPort.now();
         saveEncryptedPreview(previewId, subject.id(), moduleNumber, result.filename(), result.sheetName(), result, actor.username(), now);
@@ -431,6 +440,26 @@ public class CoreImportService {
         return subject;
     }
 
+    private void clearUnitIfPopulated(long subjectId, int unitNumber) {
+        SubjectModule existing = moduleRepository.findBySubjectAndNumber(subjectId, unitNumber).orElse(null);
+        if (existing != null && (existing.status() != ModuleStatus.EMPTY || existing.questionCount() > 0)) {
+            mcqRepository.replaceModuleMcqs(subjectId, unitNumber, List.of());
+            moduleRepository.save(new SubjectModule(
+                    existing.id(),
+                    existing.subjectId(),
+                    existing.subjectCode(),
+                    existing.moduleNumber(),
+                    ModuleStatus.EMPTY,
+                    0,
+                    null,
+                    null,
+                    null,
+                    0,
+                    0
+            ));
+        }
+    }
+
     private static RawSheetData pickSingleModuleSheet(List<RawSheetData> sheets, int targetModule) {
         for (RawSheetData s : sheets) {
             Integer parsed = parseModuleNumberFromSheetName(s.sheetName());
@@ -442,19 +471,12 @@ public class CoreImportService {
     }
 
     private static Integer parseModuleNumberFromSheetName(String sheetName) {
-        if (sheetName == null) {
-            return null;
-        }
-        Matcher m = MODULE_SHEET_NAME.matcher(sheetName.trim());
-        if (m.matches()) {
-            return Integer.parseInt(m.group(1));
-        }
-        return null;
+        return ModuleUnit.parseSheetUnit(sheetName);
     }
 
     private static void validateModuleNumber(int moduleNumber) {
-        if (moduleNumber < 1 || moduleNumber > 5) {
-            throw new BadRequestException("Module number must be between 1 and 5");
+        if (!ModuleUnit.isValidUnit(moduleNumber)) {
+            throw new BadRequestException("Module number must be 1-5 (full) or 11/12..51/52 (half-module)");
         }
     }
 

@@ -2,6 +2,8 @@ package com.yourorg.qbank.core;
 
 import com.yourorg.qbank.core.exception.BadRequestException;
 import com.yourorg.qbank.core.exception.ForbiddenException;
+import com.yourorg.qbank.core.importer.ImportPreviewResult;
+import com.yourorg.qbank.core.importer.RawSheetData;
 import com.yourorg.qbank.core.model.*;
 import com.yourorg.qbank.core.service.CoreExamPaperService;
 import com.yourorg.qbank.core.service.CoreImportService;
@@ -140,5 +142,100 @@ class SessionDisjointAndCapacityTest {
         fx.examRepo.tamperVersionHash(chosenSet.id(), "A", "0".repeat(64));
         assertThrows(ForbiddenException.class, () -> fx.frozenPaperProvider.version(sid, "A"));
         assertTrue(fx.auditPort.entries.stream().anyMatch(e -> "PAPER_INTEGRITY_TAMPER_ALERT".equals(e.eventType())));
+    }
+
+    @Test
+    void halfModuleProportionalBlueprintAndLockIsolationAndSeeMerge() {
+        InMemoryQBankFixture fx = new InMemoryQBankFixture();
+        fx.asAdmin("admin1");
+        Subject subj = fx.subjectService.createSubject("CS405", "Cloud Systems", 120, 1);
+
+        // HOD uploads M1 (80 Qs), M2 1st Half (50 Qs), M3..M5 (80 Qs each) using mixed multi-sheet names
+        fx.asHod("hod1");
+        List<RawSheetData> mixedSheets = List.of(
+                InMemoryQBankFixture.makeSingleModuleSheet("Module 1", 1, 80),
+                InMemoryQBankFixture.makeSingleModuleSheet("Module 2 (1st Half)", 21, 50),
+                InMemoryQBankFixture.makeSingleModuleSheet("Module 3", 3, 80),
+                InMemoryQBankFixture.makeSingleModuleSheet("Module 4", 4, 80),
+                InMemoryQBankFixture.makeSingleModuleSheet("Module 5", 5, 80)
+        );
+        byte[] bytes = fx.spreadsheetPort.stageWorkbook("mixed.xlsx", mixedSheets);
+        List<ImportPreviewResult> previews = fx.importService.previewMultiModule(subj.id(), bytes, "mixed.xlsx");
+        assertEquals(5, previews.size());
+        var m2HalfPreview = previews.stream().filter(p -> p.moduleNumber() == 21).findFirst().orElseThrow();
+        assertEquals(60, m2HalfPreview.expectedCount());
+        for (var pr : previews) {
+            fx.importService.confirmPreview(pr.previewId());
+        }
+
+        // COE verifies proportional blueprint math
+        fx.asCoe("coe1");
+        var bp15 = fx.examPaperService.calculateBlueprint(subj.id(), ExamType.INTERNAL, List.of(1, 21), 0);
+        assertEquals(30, bp15.totalQuestions());
+        assertEquals(Map.of(1, 20, 21, 10), bp15.moduleCounts());
+
+        var bp25 = fx.examPaperService.calculateBlueprint(subj.id(), ExamType.INTERNAL, List.of(1, 2, 31), 0);
+        assertEquals(Map.of(1, 12, 2, 12, 31, 6), bp25.moduleCounts());
+
+        var bp35Rot0 = fx.examPaperService.calculateBlueprint(subj.id(), ExamType.INTERNAL, List.of(1, 2, 3, 41), 0);
+        assertEquals(Map.of(1, 9, 2, 9, 3, 8, 41, 4), bp35Rot0.moduleCounts());
+        var bp35Rot1 = fx.examPaperService.calculateBlueprint(subj.id(), ExamType.INTERNAL, List.of(1, 2, 3, 41), 1);
+        assertEquals(Map.of(1, 8, 2, 9, 3, 9, 41, 4), bp35Rot1.moduleCounts());
+
+        assertThrows(IllegalArgumentException.class, () ->
+                fx.examPaperService.calculateBlueprint(subj.id(), ExamType.INTERNAL, List.of(2, 21), 0));
+
+        // Generate and freeze 1.5-module IA-1 (M1 Full + M2 1st Half)
+        Instant start = fx.clock.now().plusSeconds(300);
+        Instant end = start.plusSeconds(3600);
+        var ia1 = fx.examPaperService.generateExam(
+                subj.id(), "IA-1 1.5 Modules", ExamType.INTERNAL, List.of(1, 21),
+                fx.clock.today(), 0, false, start, end, null, null);
+        long ia1Sid = ia1.sessions().get(0).session().id();
+        fx.examPaperService.approveAndFreezeSession(ia1Sid, 1, 0, start, end);
+
+        List<PaperSetStored> ia1Sets = fx.examRepo.findSetsBySessionId(ia1Sid);
+        assertEquals(4, ia1Sets.size());
+        Set<String> allIa1Ids = new HashSet<>();
+        for (PaperSetStored s : ia1Sets) {
+            assertEquals(30, s.questionCount());
+            long m1Count = s.questionIds().stream().filter(id -> id.startsWith("CS405-M1-")).count();
+            long m2aCount = s.questionIds().stream().filter(id -> id.startsWith("CS405-M2A-")).count();
+            assertEquals(20, m1Count);
+            assertEquals(10, m2aCount);
+            for (String qid : s.questionIds()) {
+                assertTrue(allIa1Ids.add(qid));
+            }
+        }
+
+        // Lock isolation: M2 1st Half (21) and M2 Full (2) are blocked, while M2 2nd Half (22) MUST succeed!
+        fx.asHod("hod1");
+        byte[] lockTestA = fx.spreadsheetPort.stageWorkbook("m2a.xlsx", List.of(InMemoryQBankFixture.makeSingleModuleSheet("Module 2A", 21, 50)));
+        var pBlockedA = fx.importService.previewSingleModule(subj.id(), 21, lockTestA, "m2a.xlsx");
+        assertThrows(com.yourorg.qbank.core.exception.ConflictException.class, () -> fx.importService.confirmPreview(pBlockedA.previewId()));
+
+        byte[] lockTestFull = fx.spreadsheetPort.stageWorkbook("m2f.xlsx", List.of(InMemoryQBankFixture.makeSingleModuleSheet("Module 2", 2, 100)));
+        var pBlockedFull = fx.importService.previewSingleModule(subj.id(), 2, lockTestFull, "m2f.xlsx");
+        assertThrows(com.yourorg.qbank.core.exception.ConflictException.class, () -> fx.importService.confirmPreview(pBlockedFull.previewId()));
+
+        byte[] m2bBytes = fx.spreadsheetPort.stageWorkbook("m2b.xlsx", List.of(InMemoryQBankFixture.makeSingleModuleSheet("Module 2B", 22, 50)));
+        var p2b = fx.importService.previewSingleModule(subj.id(), 22, m2bBytes, "m2b.xlsx");
+        var res2b = fx.importService.confirmPreview(p2b.previewId());
+        assertEquals(50, res2b.questionCount());
+
+        // Now COE runs SEE across M1..M5 -> Module 2 automatically merges M2A (50) + M2B (50) = 100 Qs (>= 40 needed)!
+        fx.asCoe("coe1");
+        Instant seeStart = end.plusSeconds(3600);
+        Instant seeEnd = seeStart.plusSeconds(5400);
+        var see = fx.examPaperService.generateExam(
+                subj.id(), "Cloud SEE", ExamType.SEE, List.of(1, 2, 3, 4, 5),
+                fx.clock.today().plusDays(7), 0, false, seeStart, seeEnd, null, null);
+        long seeSid = see.sessions().get(0).session().id();
+        fx.examPaperService.approveAndFreezeSession(seeSid, 1, 0, seeStart, seeEnd);
+
+        // Once SEE freezes Full M2 (drawing from 21+22), M2B (22) is also locked!
+        fx.asHod("hod1");
+        var p2bRetry = fx.importService.previewSingleModule(subj.id(), 22, m2bBytes, "m2b.xlsx");
+        assertThrows(com.yourorg.qbank.core.exception.ConflictException.class, () -> fx.importService.confirmPreview(p2bRetry.previewId()));
     }
 }

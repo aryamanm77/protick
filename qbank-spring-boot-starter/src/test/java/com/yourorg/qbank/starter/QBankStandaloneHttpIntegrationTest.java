@@ -485,6 +485,124 @@ class QBankStandaloneHttpIntegrationTest {
                         .header("Authorization", "Bearer " + adminToken))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.rowCounts.qbank_mcqs").value(400));
+
+        // 9. Half-module HTTP workflow: 1.5 modules (M1 Full + M2 1st Half) -> 20 + 10 blueprint, freeze M2A without blocking M2B!
+        MvcResult cs105Res = mvc.perform(post("/exam/api/v1/subjects")
+                        .header("Authorization", "Bearer " + hodToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"code\":\"CS105\",\"name\":\"Operating Systems\",\"expectedQuestionsPerModule\":120,\"marksPerQuestion\":1}"))
+                .andExpect(status().isOk())
+                .andReturn();
+        long cs105Id = json.readTree(cs105Res.getResponse().getContentAsString()).get("id").asLong();
+
+        byte[] m1Wb = buildSingleSheetWorkbook("Module 1", 80);
+        byte[] m2aWb = buildSingleSheetWorkbook("Module 2 (1st Half)", 50);
+        byte[] m2bWb = buildSingleSheetWorkbook("Module 2 (2nd Half)", 50);
+
+        String p1Id = json.readTree(mvc.perform(multipart("/exam/api/v1/hod/subjects/" + cs105Id + "/modules/1/preview")
+                        .file(new MockMultipartFile("file", "m1.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", m1Wb))
+                        .header("Authorization", "Bearer " + hodToken))
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString()).get("previewId").asText();
+        mvc.perform(post("/exam/api/v1/hod/previews/" + p1Id + "/confirm").header("Authorization", "Bearer " + hodToken))
+                .andExpect(status().isOk());
+
+        String p2aId = json.readTree(mvc.perform(multipart("/exam/api/v1/hod/subjects/" + cs105Id + "/modules/21/preview")
+                        .file(new MockMultipartFile("file", "m2a.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", m2aWb))
+                        .header("Authorization", "Bearer " + hodToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.expectedCount").value(60))
+                .andReturn().getResponse().getContentAsString()).get("previewId").asText();
+        mvc.perform(post("/exam/api/v1/hod/previews/" + p2aId + "/confirm").header("Authorization", "Bearer " + hodToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.moduleNumber").value(21))
+                .andExpect(jsonPath("$.questionCount").value(50));
+
+        // COE previews 1.5-module blueprint -> 30 questions (20 M1 + 10 M2A)
+        mvc.perform(post("/exam/api/v1/coe/blueprint")
+                        .header("Authorization", "Bearer " + coeToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"subjectId\":" + cs105Id + ",\"examType\":\"INTERNAL\",\"modules\":[1,21],\"rotationOffset\":0}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.totalQuestions").value(30))
+                .andExpect(jsonPath("$.moduleCounts['1']").value(20))
+                .andExpect(jsonPath("$.moduleCounts['21']").value(10));
+
+        Instant hStart = NOW.get().plus(1, ChronoUnit.DAYS);
+        Instant hEnd = hStart.plus(1, ChronoUnit.HOURS);
+        String iaPayload = json.writeValueAsString(Map.of(
+                "subjectId", cs105Id,
+                "title", "OS IA-1 (1.5 Modules)",
+                "examType", ExamType.INTERNAL,
+                "modules", List.of(1, 21),
+                "examDate", LocalDate.of(2026, 6, 15).toString(),
+                "rotationOffset", 0,
+                "includeAfternoon", false,
+                "morningStartAt", hStart.toString(),
+                "morningEndAt", hEnd.toString()
+        ));
+        JsonNode iaGen = json.readTree(mvc.perform(post("/exam/api/v1/coe/exams/generate")
+                        .header("Authorization", "Bearer " + coeToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(iaPayload))
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString());
+        long iaSid = iaGen.get("sessions").get(0).get("session").get("id").asLong();
+        int iaVer = iaGen.get("sessions").get(0).get("session").get("version").asInt();
+
+        mvc.perform(post("/exam/api/v1/coe/sessions/" + iaSid + "/approve")
+                        .header("Authorization", "Bearer " + coeToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(Map.of(
+                                "setNumber", 1,
+                                "expectedVersion", iaVer,
+                                "scheduledStartAt", hStart.toString(),
+                                "scheduledEndAt", hEnd.toString()))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("FROZEN"));
+
+        // M2A (21) is locked (409), while M2B (22) succeeds cleanly!
+        String p2aLocked = json.readTree(mvc.perform(multipart("/exam/api/v1/hod/subjects/" + cs105Id + "/modules/21/preview")
+                        .file(new MockMultipartFile("file", "m2a.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", m2aWb))
+                        .header("Authorization", "Bearer " + hodToken))
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString()).get("previewId").asText();
+        mvc.perform(post("/exam/api/v1/hod/previews/" + p2aLocked + "/confirm").header("Authorization", "Bearer " + hodToken))
+                .andExpect(status().isConflict());
+
+        String p2bId = json.readTree(mvc.perform(multipart("/exam/api/v1/hod/subjects/" + cs105Id + "/modules/22/preview")
+                        .file(new MockMultipartFile("file", "m2b.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", m2bWb))
+                        .header("Authorization", "Bearer " + hodToken))
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString()).get("previewId").asText();
+        mvc.perform(post("/exam/api/v1/hod/previews/" + p2bId + "/confirm").header("Authorization", "Bearer " + hodToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.moduleNumber").value(22))
+                .andExpect(jsonPath("$.status").value("READY"));
+    }
+
+    private static byte[] buildSingleSheetWorkbook(String sheetName, int count) throws Exception {
+        try (XSSFWorkbook wb = new XSSFWorkbook(); ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+            Sheet s = wb.createSheet(sheetName);
+            Row h = s.createRow(0);
+            h.createCell(0).setCellValue("Question");
+            h.createCell(1).setCellValue("Option A");
+            h.createCell(2).setCellValue("Option B");
+            h.createCell(3).setCellValue("Option C");
+            h.createCell(4).setCellValue("Option D");
+            h.createCell(5).setCellValue("Answer");
+            for (int q = 1; q <= count; q++) {
+                Row r = s.createRow(q);
+                r.createCell(0).setCellValue(sheetName + " Question #" + q + "?");
+                r.createCell(1).setCellValue("OptA-" + q);
+                r.createCell(2).setCellValue("OptB-" + q);
+                r.createCell(3).setCellValue("OptC-" + q);
+                r.createCell(4).setCellValue("OptD-" + q);
+                r.createCell(5).setCellValue("A");
+            }
+            wb.write(out);
+            return out.toByteArray();
+        }
     }
 
     private String loginStaff(String username, String password) throws Exception {

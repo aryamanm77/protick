@@ -19,6 +19,7 @@ import com.yourorg.qbank.core.model.ExamType;
 import com.yourorg.qbank.core.model.GeneratedSetData;
 import com.yourorg.qbank.core.model.GeneratedVersionData;
 import com.yourorg.qbank.core.model.ModuleStatus;
+import com.yourorg.qbank.core.model.ModuleUnit;
 import com.yourorg.qbank.core.model.PaperSetStatus;
 import com.yourorg.qbank.core.model.PaperSetStored;
 import com.yourorg.qbank.core.model.PaperVersionStored;
@@ -557,31 +558,55 @@ public class CoreExamPaperService {
     }
 
     private void verifySelectedModulesReady(Subject subject, List<Integer> modules) {
-        Map<Integer, SubjectModule> modMap = new LinkedHashMap<>();
-        for (SubjectModule m : moduleRepository.findBySubjectId(subject.id())) {
-            modMap.put(m.moduleNumber(), m);
-        }
+        Map<Integer, SubjectModule> modMap = loadModuleMap(subject.id());
         for (Integer modNum : modules) {
-            SubjectModule m = modMap.get(modNum);
-            if (m == null || m.status() != ModuleStatus.READY || m.questionCount() <= 0) {
+            if (!isUnitReady(modMap, modNum)) {
                 throw new ConflictException(
-                        "Module " + modNum + " of " + subject.code() + " is not READY (must be uploaded and confirmed by HOD first)");
+                        ModuleUnit.displayName(modNum) + " of " + subject.code() + " is not READY (must be uploaded and confirmed by HOD first)");
             }
         }
     }
 
+    private Map<Integer, SubjectModule> loadModuleMap(long subjectId) {
+        Map<Integer, SubjectModule> modMap = new LinkedHashMap<>();
+        for (SubjectModule m : moduleRepository.findBySubjectId(subjectId)) {
+            modMap.put(m.moduleNumber(), m);
+        }
+        return modMap;
+    }
+
+    private static boolean isModReady(SubjectModule m) {
+        return m != null && m.status() == ModuleStatus.READY && m.questionCount() > 0;
+    }
+
+    private static boolean isUnitReady(Map<Integer, SubjectModule> modMap, int modNum) {
+        if (ModuleUnit.isHalf(modNum)) {
+            return isModReady(modMap.get(modNum));
+        }
+        if (isModReady(modMap.get(modNum))) {
+            return true;
+        }
+        return isModReady(modMap.get(ModuleUnit.firstHalf(modNum)))
+                && isModReady(modMap.get(ModuleUnit.secondHalf(modNum)));
+    }
+
     private Map<Integer, List<PlainMcq>> loadDecryptedModulePools(long subjectId, List<Integer> modules) {
+        Map<Integer, SubjectModule> modMap = loadModuleMap(subjectId);
         Map<Integer, List<PlainMcq>> pool = new LinkedHashMap<>();
         for (Integer modNum : modules) {
-            List<EncryptedMcq> encrypted = mcqRepository.findBySubjectAndModule(subjectId, modNum);
-            List<PlainMcq> decrypted = new ArrayList<>(encrypted.size());
-            for (EncryptedMcq e : encrypted) {
-                String text = cryptoPort.decrypt(e.textEnc(), QBankAad.mcqText(subjectId, modNum, e.id()));
-                List<String> opts = jsonCodec.fromJsonStringList(
-                        cryptoPort.decrypt(e.optionsEnc(), QBankAad.mcqOptions(subjectId, modNum, e.id())));
-                int correct = Integer.parseInt(
-                        cryptoPort.decrypt(e.correctIndexEnc(), QBankAad.mcqCorrectIndex(subjectId, modNum, e.id())));
-                decrypted.add(new PlainMcq(e.id(), subjectId, modNum, e.seq(), text, opts, correct, e.sourceRow()));
+            List<Integer> sourceUnits = (ModuleUnit.isFull(modNum) && !isModReady(modMap.get(modNum)))
+                    ? List.of(ModuleUnit.firstHalf(modNum), ModuleUnit.secondHalf(modNum))
+                    : List.of(modNum);
+            List<PlainMcq> decrypted = new ArrayList<>();
+            for (Integer srcUnit : sourceUnits) {
+                for (EncryptedMcq e : mcqRepository.findBySubjectAndModule(subjectId, srcUnit)) {
+                    String text = cryptoPort.decrypt(e.textEnc(), QBankAad.mcqText(subjectId, e.moduleNumber(), e.id()));
+                    List<String> opts = jsonCodec.fromJsonStringList(
+                            cryptoPort.decrypt(e.optionsEnc(), QBankAad.mcqOptions(subjectId, e.moduleNumber(), e.id())));
+                    int correct = Integer.parseInt(
+                            cryptoPort.decrypt(e.correctIndexEnc(), QBankAad.mcqCorrectIndex(subjectId, e.moduleNumber(), e.id())));
+                    decrypted.add(new PlainMcq(e.id(), subjectId, e.moduleNumber(), e.seq(), text, opts, correct, e.sourceRow()));
+                }
             }
             pool.put(modNum, decrypted);
         }

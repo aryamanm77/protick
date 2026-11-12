@@ -294,8 +294,12 @@
         });
 
         var selMod = el('select');
-        selMod.appendChild(el('option', { value: 'MULTI' }, 'Multi-Sheet (Module 1..5)'));
-        for (var m = 1; m <= 5; m++) selMod.appendChild(el('option', { value: m }, 'Single Module ' + m));
+        selMod.appendChild(el('option', { value: 'MULTI' }, 'Multi-Sheet (Module 1..5 / 1A..5B)'));
+        for (var m = 1; m <= 5; m++) {
+            selMod.appendChild(el('option', { value: String(m) }, 'Module ' + m + ' (Full)'));
+            selMod.appendChild(el('option', { value: String(m * 10 + 1) }, 'Module ' + m + ' — 1st Half (Part A)'));
+            selMod.appendChild(el('option', { value: String(m * 10 + 2) }, 'Module ' + m + ' — 2nd Half (Part B)'));
+        }
 
         var fileIn = el('input', { type: 'file', accept: '.xlsx,.xls' });
 
@@ -342,20 +346,72 @@
         if (selSub.value) loadModules(selSub.value, modBox);
     }
 
+    function formatModuleUnit(u) {
+        var n = Number(u);
+        if (n >= 1 && n <= 5) return 'Module ' + n;
+        var base = Math.floor(n / 10);
+        var part = n % 10;
+        if (base >= 1 && base <= 5 && (part === 1 || part === 2)) {
+            return 'Module ' + base + ' (' + (part === 1 ? '1st Half' : '2nd Half') + ')';
+        }
+        return 'Module ' + n;
+    }
+
+    function formatModuleShort(u) {
+        var n = Number(u);
+        if (n >= 1 && n <= 5) return 'M' + n;
+        var base = Math.floor(n / 10);
+        var part = n % 10;
+        if (base >= 1 && base <= 5 && (part === 1 || part === 2)) {
+            return 'M' + base + (part === 1 ? 'A' : 'B');
+        }
+        return 'M' + n;
+    }
+
+    function moduleUnitWeight(u) {
+        var n = Number(u);
+        return (n >= 1 && n <= 5) ? 2 : (Math.floor(n / 10) >= 1 ? 1 : 0);
+    }
+
+    function renderModuleStatusCards(mods, targetEl) {
+        clearEl(targetEl);
+        var byNum = {};
+        (mods || []).forEach(function (md) { byNum[md.moduleNumber] = md; });
+        for (var m = 1; m <= 5; m++) {
+            var full = byNum[m];
+            var h1 = byNum[m * 10 + 1];
+            var h2 = byNum[m * 10 + 2];
+            var box = el('div', { className: 'qb-stat-box' });
+            box.appendChild(el('strong', null, 'Module ' + m));
+            var usingHalves = (h1 && h1.status === 'READY') || (h2 && h2.status === 'READY');
+            if (usingHalves && (!full || full.status !== 'READY')) {
+                var r1 = h1 && h1.status === 'READY';
+                var r2 = h2 && h2.status === 'READY';
+                var w1 = el('div', { style: 'margin-top:6px;' });
+                w1.appendChild(el('span', { className: 'badge ' + (r1 ? 'badge-ok' : 'badge-warn') },
+                        'A: ' + (r1 ? '✓ ' : '○ ') + (h1 ? h1.questionCount : 0)));
+                var w2 = el('div', { style: 'margin-top:4px;' });
+                w2.appendChild(el('span', { className: 'badge ' + (r2 ? 'badge-ok' : 'badge-warn') },
+                        'B: ' + (r2 ? '✓ ' : '○ ') + (h2 ? h2.questionCount : 0)));
+                box.appendChild(w1);
+                box.appendChild(w2);
+            } else {
+                var ready = full && full.status === 'READY';
+                var wrapStatus = el('div', { style: 'margin-top:6px;' });
+                wrapStatus.appendChild(el('span', { className: 'badge ' + (ready ? 'badge-ok' : 'badge-warn') },
+                        (ready ? '✓ READY · ' : '○ EMPTY · ') + (full ? full.questionCount : 0)));
+                box.appendChild(wrapStatus);
+            }
+            targetEl.appendChild(box);
+        }
+        return byNum;
+    }
+
     async function loadModules(subjectId, targetEl) {
         clearEl(targetEl);
         if (!subjectId) return;
         var mods = await Api.request('/subjects/' + subjectId + '/modules');
-        mods.forEach(function (m) {
-            var box = el('div', { className: 'qb-stat-box' });
-            box.appendChild(el('strong', null, 'Module ' + m.moduleNumber));
-            var ready = m.status === 'READY';
-            var wrapStatus = el('div', { style: 'margin-top:6px;' });
-            wrapStatus.appendChild(el('span', { className: 'badge ' + (ready ? 'badge-ok' : 'badge-warn') },
-                    (ready ? '✓ READY · ' : '○ EMPTY · ') + m.questionCount));
-            box.appendChild(wrapStatus);
-            targetEl.appendChild(box);
-        });
+        renderModuleStatusCards(mods, targetEl);
     }
 
     function rowStatusBadgeClass(status) {
@@ -382,7 +438,7 @@
     }
 
     function openHodRowEditModal(preview, previewIdx, row, previews, host, onConfirmed) {
-        openModal('Edit Row ' + row.sourceRow + ' (Module ' + preview.moduleNumber + ')', function (dlg, close) {
+        openModal('Edit Row ' + row.sourceRow + ' (' + formatModuleUnit(preview.moduleNumber) + ')', function (dlg, close) {
             var qIn = el('textarea', { rows: '3', style: 'width:100%' });
             qIn.value = row.questionText || '';
             dlg.appendChild(field('Question Text', qIn));
@@ -454,7 +510,7 @@
                     for (var i = 0; i < readyPreviews.length; i++) {
                         var target = readyPreviews[i];
                         var c = await Api.request('/hod/previews/' + target.previewId + '/confirm', { method: 'POST' });
-                        confirmedMsgs.push('M' + c.moduleNumber + ': ' + c.questionCount);
+                        confirmedMsgs.push(formatModuleShort(c.moduleNumber) + ': ' + c.questionCount);
                         var pos = previews.indexOf(target);
                         if (pos >= 0) previews.splice(pos, 1);
                     }
@@ -477,7 +533,7 @@
         previews.forEach(function (p, previewIdx) {
             var card = el('div', { className: 'qb-card' });
             var hdrRow = el('div', { className: 'qb-row', style: 'justify-content:space-between;align-items:center;' });
-            hdrRow.appendChild(el('h3', { style: 'margin:0;' }, 'Module ' + p.moduleNumber + ' (' + p.sheetName + ')'));
+            hdrRow.appendChild(el('h3', { style: 'margin:0;' }, formatModuleUnit(p.moduleNumber) + ' (' + p.sheetName + ')'));
             hdrRow.appendChild(el('span', { className: 'badge ' + (p.canConfirmDirectly ? 'badge-ok' : 'badge-err') },
                     p.canConfirmDirectly ? '✓ READY' : '✕ ' + p.errorCount + ' ERROR(S)'));
             card.appendChild(hdrRow);
@@ -502,7 +558,7 @@
                     previews.splice(previewIdx, 1);
                     renderHodPreviews(host, previews, onConfirmed);
                     await onConfirmed();
-                    setFlash('Module ' + c.moduleNumber + ' READY: ' + c.questionCount + ' questions', 'ok');
+                    setFlash(formatModuleUnit(c.moduleNumber) + ' READY: ' + c.questionCount + ' questions', 'ok');
                 } catch (e) { setFlash(e.message, 'err'); }
                 finally { confirmBtn.disabled = false; }
             });
@@ -604,19 +660,25 @@
         r1.appendChild(field('Rotation', rotSel));
         card.appendChild(r1);
 
-        // Module checkboxes (1..5)
-        var modChecks = [];
-        var modChkRow = el('div', { className: 'qb-row', style: 'align-items:center;' });
+        // Module unit selectors (Off / Full 1.0 / 1st Half 0.5 / 2nd Half 0.5 per M1..M5)
+        var modSelectors = [];
+        var modWeightBadge = el('span', { className: 'badge', style: 'margin-left:auto;' }, '3.0 modules');
+        var modChkRow = el('div', { className: 'qb-row', style: 'align-items:center;flex-wrap:wrap;gap:10px;' });
         modChkRow.appendChild(el('strong', null, 'Modules:'));
         for (var m = 1; m <= 5; m++) {
-            var chk = el('input', { type: 'checkbox' });
-            chk.checked = (m <= 3);
-            modChecks.push({ modNum: m, chk: chk });
-            var lbl = el('label', { style: 'display:flex;align-items:center;gap:4px;' });
-            lbl.appendChild(chk);
-            lbl.appendChild(document.createTextNode('M' + m));
-            modChkRow.appendChild(lbl);
+            var uSel = el('select', { style: 'min-width:118px;padding:5px 8px;' });
+            uSel.appendChild(el('option', { value: '' }, 'Off'));
+            uSel.appendChild(el('option', { value: String(m) }, 'Full (1.0)'));
+            uSel.appendChild(el('option', { value: String(m * 10 + 1) }, '1st Half (0.5)'));
+            uSel.appendChild(el('option', { value: String(m * 10 + 2) }, '2nd Half (0.5)'));
+            uSel.value = (m <= 3) ? String(m) : '';
+            modSelectors.push({ modNum: m, sel: uSel });
+            var wrapLbl = el('label', { style: 'display:flex;align-items:center;gap:6px;font-weight:500;' });
+            wrapLbl.appendChild(document.createTextNode('M' + m));
+            wrapLbl.appendChild(uSel);
+            modChkRow.appendChild(wrapLbl);
         }
+        modChkRow.appendChild(modWeightBadge);
         card.appendChild(modChkRow);
 
         var modStatusGrid = el('div', { className: 'qb-grid-5', style: 'margin-bottom:12px;' });
@@ -646,43 +708,42 @@
 
         function selectedModules() {
             if (selType.value === 'SEE') return [1, 2, 3, 4, 5];
-            return modChecks.filter(function (x) { return x.chk.checked; }).map(function (x) { return x.modNum; });
+            return modSelectors
+                    .map(function (x) { return Number(x.sel.value); })
+                    .filter(function (v) { return v > 0; });
         }
 
-        function syncModuleCheckboxMode() {
+        function syncModuleSelectionMode() {
             var isSee = selType.value === 'SEE';
-            modChecks.forEach(function (x) {
-                if (isSee) x.chk.checked = true;
-                x.chk.disabled = isSee;
+            modSelectors.forEach(function (x) {
+                if (isSee) x.sel.value = String(x.modNum);
+                x.sel.disabled = isSee;
             });
+            updateSelectedWeightBadge();
+        }
+
+        function updateSelectedWeightBadge() {
+            var chosen = selectedModules();
+            var halfUnits = chosen.reduce(function (acc, u) { return acc + moduleUnitWeight(u); }, 0);
+            modWeightBadge.textContent = (halfUnits / 2).toFixed(1) + ' module(s)';
         }
 
         var cachedModsByNum = {};
         async function refreshCoeBlueprint() {
             clearEl(modStatusGrid);
             clearEl(blueprintBox);
+            updateSelectedWeightBadge();
             if (!selSub.value) {
                 blueprintBox.textContent = 'No active subject selected.';
                 return;
             }
             try {
                 var mods = await Api.request('/subjects/' + selSub.value + '/modules');
-                cachedModsByNum = {};
-                mods.forEach(function (md) {
-                    cachedModsByNum[md.moduleNumber] = md;
-                    var box = el('div', { className: 'qb-stat-box' });
-                    box.appendChild(el('strong', null, 'Module ' + md.moduleNumber));
-                    var ready = md.status === 'READY';
-                    var badgeWrap = el('div', { style: 'margin-top:6px;' });
-                    badgeWrap.appendChild(el('span', { className: 'badge ' + (ready ? 'badge-ok' : 'badge-warn') },
-                            (ready ? '✓ ' : '○ ') + md.questionCount));
-                    box.appendChild(badgeWrap);
-                    modStatusGrid.appendChild(box);
-                });
+                cachedModsByNum = renderModuleStatusCards(mods, modStatusGrid);
 
                 var chosen = selectedModules();
                 if (chosen.length === 0) {
-                    blueprintBox.textContent = 'Select at least 1 module for INTERNAL blueprint.';
+                    blueprintBox.textContent = 'Select at least 1 module or half-module for INTERNAL blueprint.';
                     return;
                 }
                 var bp = await Api.request('/coe/blueprint', {
@@ -699,13 +760,26 @@
                 var hasShortage = false;
                 var multiplier = aftChk.checked ? 8 : 4;
                 Object.keys(bp.moduleCounts || {}).forEach(function (mKey) {
+                    var u = Number(mKey);
                     var reqPerSet = bp.moduleCounts[mKey];
                     var reqTotal = reqPerSet * multiplier;
-                    var modInfo = cachedModsByNum[Number(mKey)];
-                    var avail = modInfo ? modInfo.questionCount : 0;
-                    var ok = modInfo && modInfo.status === 'READY' && avail >= reqTotal;
+                    var modInfo = cachedModsByNum[u];
+                    var avail = 0;
+                    var ready = false;
+                    if (modInfo && modInfo.status === 'READY' && modInfo.questionCount > 0) {
+                        avail = modInfo.questionCount;
+                        ready = true;
+                    } else if (u >= 1 && u <= 5) {
+                        var h1 = cachedModsByNum[u * 10 + 1];
+                        var h2 = cachedModsByNum[u * 10 + 2];
+                        if (h1 && h1.status === 'READY' && h1.questionCount > 0 && h2 && h2.status === 'READY' && h2.questionCount > 0) {
+                            avail = h1.questionCount + h2.questionCount;
+                            ready = true;
+                        }
+                    }
+                    var ok = ready && avail >= reqTotal;
                     if (!ok) hasShortage = true;
-                    minPerModNote.push('M' + mKey + ': need ' + reqTotal + ' (' + multiplier + '×' + reqPerSet + '), have ' + avail + (ok ? ' OK' : ' SHORT'));
+                    minPerModNote.push(formatModuleShort(u) + ': need ' + reqTotal + ' (' + multiplier + '×' + reqPerSet + '), have ' + avail + (ok ? ' OK' : ' SHORT'));
                 });
                 blueprintBox.appendChild(el('div', {
                     style: 'margin-top:4px;font-size:0.9em;color:' + (hasShortage ? 'var(--qb-danger)' : 'var(--qb-ok)')
@@ -716,10 +790,10 @@
         }
 
         selSub.onchange = refreshCoeBlueprint;
-        selType.onchange = function () { syncModuleCheckboxMode(); refreshCoeBlueprint(); };
+        selType.onchange = function () { syncModuleSelectionMode(); refreshCoeBlueprint(); };
         rotSel.onchange = refreshCoeBlueprint;
         aftChk.onchange = refreshCoeBlueprint;
-        modChecks.forEach(function (x) { x.chk.onchange = refreshCoeBlueprint; });
+        modSelectors.forEach(function (x) { x.sel.onchange = refreshCoeBlueprint; });
 
         var coeActRow = el('div', { className: 'qb-row' });
         var genBtn = btn('Generate', 'btn-primary', async function () {
@@ -837,7 +911,7 @@
             });
         }
 
-        syncModuleCheckboxMode();
+        syncModuleSelectionMode();
         refreshCoeBlueprint();
         refreshCoeSessions();
     }

@@ -140,7 +140,9 @@ public class CoreSubjectService {
         authGuard.requireAnyRole(UserRole.ADMIN, UserRole.HOD, UserRole.COE, UserRole.INVIGILATOR);
         subjectRepository.findById(subjectId)
                 .orElseThrow(() -> new NotFoundException("Subject not found: " + subjectId));
-        return moduleRepository.findBySubjectId(subjectId);
+        return moduleRepository.findBySubjectId(subjectId).stream()
+                .sorted(java.util.Comparator.comparingInt(m -> com.yourorg.qbank.core.model.ModuleUnit.sortOrder(m.moduleNumber())))
+                .toList();
     }
 
     private static String normalizeCode(String rawCode) {

@@ -403,7 +403,8 @@ public class InMemoryQBankFixture {
                     .filter(s -> s.status() == SessionStatus.FROZEN || s.status() == SessionStatus.LIVE)
                     .filter(s -> {
                         Exam e = exams.get(s.examId());
-                        return e != null && Objects.equals(e.subjectId(), subjectId) && e.selectedModules().contains(moduleNumber);
+                        return e != null && Objects.equals(e.subjectId(), subjectId)
+                                && e.selectedModules().stream().anyMatch(m -> ModuleUnit.overlaps(m, moduleNumber));
                     })
                     .toList();
         }

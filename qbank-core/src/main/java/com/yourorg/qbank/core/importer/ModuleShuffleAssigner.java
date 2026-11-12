@@ -1,5 +1,6 @@
 package com.yourorg.qbank.core.importer;
 
+import com.yourorg.qbank.core.model.ModuleUnit;
 import com.yourorg.qbank.core.model.PlainMcq;
 import com.yourorg.qbank.core.port.RandomPort;
 
@@ -88,7 +89,10 @@ public class ModuleShuffleAssigner {
     }
 
     public static String formatId(String subjectCode, int moduleNumber, int seq) {
-        return String.format(Locale.ROOT, "%s-M%d-%03d", subjectCode.trim().toUpperCase(Locale.ROOT), moduleNumber, seq);
+        return String.format(Locale.ROOT, "%s-%s-%03d",
+                subjectCode.trim().toUpperCase(Locale.ROOT),
+                ModuleUnit.shortCode(moduleNumber),
+                seq);
     }
 
     private boolean isKept(ParsedQuestionRow row) {

@@ -188,7 +188,7 @@ public class JdbcExamRepository implements ExamRepository {
         List<Exam> exams = findExamsBySubjectId(subjectId);
         List<ExamSession> matching = new ArrayList<>();
         for (Exam exam : exams) {
-            if (exam.selectedModules().contains(moduleNumber)) {
+            if (exam.selectedModules().stream().anyMatch(m -> ModuleUnit.overlaps(m, moduleNumber))) {
                 for (ExamSession s : findSessionsByExamId(exam.id())) {
                     if (s.status() == SessionStatus.FROZEN || s.status() == SessionStatus.LIVE) {
                         matching.add(s);
