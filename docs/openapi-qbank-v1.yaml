@@ -1,0 +1,465 @@
+openapi: 3.0.3
+info:
+  title: QBank Question Bank, Paper Generation & Exam Session API
+  version: 1.0.0
+  description: >
+    Portable hexagonal REST v1 contract exposed under configurable `{basePath}` (default `/qbank`).
+    Enforces server-side RBAC, AES-256-GCM encryption at rest, blind COE paper selection,
+    window-gated paper decryption, single-active-session student enforcement, and hash-chained audit logging.
+servers:
+  - url: http://localhost:8080/{basePath}
+    variables:
+      basePath:
+        default: qbank
+security:
+  - StaffBearerOrHostAuth: []
+components:
+  securitySchemes:
+    StaffBearerOrHostAuth:
+      type: http
+      scheme: bearer
+      description: Standalone opaque staff token or host Spring Security session/principal.
+    StudentJwtAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: qbs1-HMAC
+      description: Short-lived HMAC-SHA256 signed student token bound to (sessionId, rollNumber, version, jti).
+    EngineServiceToken:
+      type: apiKey
+      in: header
+      name: X-QBank-Engine-Token
+  schemas:
+    ErrorResponse:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: string }
+        message: { type: string }
+    Subject:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        code: { type: string }
+        name: { type: string }
+        expectedQuestionsPerModule: { type: integer }
+        marksPerQuestion: { type: integer }
+        archived: { type: boolean }
+    SubjectModule:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        subjectId: { type: integer, format: int64 }
+        moduleNumber: { type: integer, minimum: 1, maximum: 5 }
+        status: { type: string, enum: [EMPTY, READY] }
+        questionCount: { type: integer }
+    SetSummaryCard:
+      type: object
+      description: Strictly redacted COE view (no stems, options, MCQ IDs, or keys).
+      properties:
+        setNumber: { type: integer, minimum: 1, maximum: 4 }
+        questionCount: { type: integer }
+        status: { type: string, enum: [GENERATED, CHOSEN, REJECTED, FROZEN] }
+    ConfirmImportResult:
+      type: object
+      properties:
+        subjectId: { type: integer, format: int64 }
+        subjectCode: { type: string }
+        moduleNumber: { type: integer }
+        status: { type: string }
+        questionCount: { type: integer }
+        warningCount: { type: integer }
+paths:
+  /api/v1/auth/info:
+    get:
+      summary: Current authentication mode, first-run wizard flag, and authenticated user info
+      security: []
+      responses:
+        '200':
+          description: Auth runtime state
+  /api/v1/auth/setup-admin:
+    post:
+      summary: First-run initial ADMIN creation (standalone mode only; disabled once an admin exists)
+      security: []
+      responses:
+        '200': { description: Admin created }
+        '409': { description: Initial admin already exists }
+  /api/v1/auth/login:
+    post:
+      summary: Standalone staff login (rate-limited + per-account brute-force lockout)
+      security: []
+      responses:
+        '200': { description: Bearer session token issued }
+        '401': { description: Invalid credentials }
+        '429': { description: Rate limited or account locked }
+  /api/v1/auth/logout:
+    post:
+      summary: Revoke standalone bearer session
+      responses:
+        '200': { description: Logged out }
+  /api/v1/auth/change-password:
+    post:
+      summary: Change authenticated standalone user password (clears temporary flag)
+      responses:
+        '200': { description: Password updated }
+  /api/v1/subjects:
+    get:
+      summary: List subjects (ADMIN, HOD, COE, INVIGILATOR)
+      parameters:
+        - in: query
+          name: includeArchived
+          schema: { type: boolean, default: false }
+      responses:
+        '200': { description: Subjects list }
+  /api/v1/subjects/{subjectId}:
+    get:
+      summary: Get single subject
+      parameters:
+        - { in: path, name: subjectId, required: true, schema: { type: integer, format: int64 } }
+      responses:
+        '200': { description: Subject details }
+  /api/v1/subjects/{subjectId}/modules:
+    get:
+      summary: List modules 1..5 status & counts for a subject
+      parameters:
+        - { in: path, name: subjectId, required: true, schema: { type: integer, format: int64 } }
+      responses:
+        '200': { description: Module counts/statuses only }
+  /api/v1/hod/template:
+    get:
+      summary: Download blank single-sheet or 5-module .xlsx import template (HOD)
+      parameters:
+        - { in: query, name: multi, schema: { type: boolean, default: false } }
+      responses:
+        '200': { description: Excel template bytes }
+  /api/v1/hod/subjects/{subjectId}/modules/{moduleNumber}/preview:
+    post:
+      summary: Upload & validate single-module spreadsheet into temporary encrypted draft preview (HOD)
+      parameters:
+        - { in: path, name: subjectId, required: true, schema: { type: integer, format: int64 } }
+        - { in: path, name: moduleNumber, required: true, schema: { type: integer, minimum: 1, maximum: 5 } }
+      responses:
+        '200': { description: Validation preview in sheet order for fixing errors }
+  /api/v1/hod/subjects/{subjectId}/import-multi/preview:
+    post:
+      summary: Upload & validate 5-sheet ("Module 1".."Module 5") workbook (HOD)
+      parameters:
+        - { in: path, name: subjectId, required: true, schema: { type: integer, format: int64 } }
+      responses:
+        '200': { description: List of 5 preview results }
+  /api/v1/hod/previews/{previewId}:
+    get:
+      summary: Retrieve uncommitted draft preview (returns 404 after confirm/discard)
+      parameters:
+        - { in: path, name: previewId, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Draft preview }
+        '404': { description: Not found or already committed }
+    delete:
+      summary: Discard uncommitted draft preview
+      parameters:
+        - { in: path, name: previewId, required: true, schema: { type: string } }
+      responses:
+        '204': { description: Discarded }
+  /api/v1/hod/previews/{previewId}/rows/{sourceRow}:
+    put:
+      summary: Edit or exclude a specific row in a draft preview (HOD)
+      parameters:
+        - { in: path, name: previewId, required: true, schema: { type: string } }
+        - { in: path, name: sourceRow, required: true, schema: { type: integer } }
+      responses:
+        '200': { description: Updated validation preview }
+  /api/v1/hod/previews/{previewId}/confirm:
+    post:
+      summary: Atomically auto-shuffle questions/options, assign IDs, encrypt at rest, delete draft preview, return counts/status only (HOD)
+      parameters:
+        - { in: path, name: previewId, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Module READY counts/status
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ConfirmImportResult' }
+  /api/v1/coe/blueprint:
+    post:
+      summary: Preview balanced module question distribution (COE)
+      responses:
+        '200': { description: Question count breakdown by module }
+  /api/v1/coe/exams/generate:
+    post:
+      summary: Generate Morning (and optional Afternoon) disjoint 4 sets x 4 versions A-D (COE)
+      responses:
+        '200': { description: Session metadata + SetSummaryCards only }
+        '409': { description: Insufficient bank capacity (8 * perModule rule) }
+  /api/v1/coe/exams/{examId}/afternoon:
+    post:
+      summary: Generate Afternoon session excluding all questions already used by Morning (COE)
+      parameters:
+        - { in: path, name: examId, required: true, schema: { type: integer, format: int64 } }
+      responses:
+        '200': { description: Afternoon Session metadata + SetSummaryCards }
+  /api/v1/coe/sessions:
+    get:
+      summary: List all exam sessions overview (COE)
+      responses:
+        '200': { description: Sessions overview list }
+  /api/v1/coe/sessions/{sessionId}/sets:
+    get:
+      summary: List 4 redacted SetSummaryCards for a session (COE)
+      parameters:
+        - { in: path, name: sessionId, required: true, schema: { type: integer, format: int64 } }
+      responses:
+        '200': { description: Redacted SetSummaryCards }
+  /api/v1/coe/sessions/{sessionId}/sets/{setNumber}/approval-preview:
+    get:
+      summary: Confirmation screen details {exam, set, session, date} without any questions (COE)
+      parameters:
+        - { in: path, name: sessionId, required: true, schema: { type: integer, format: int64 } }
+        - { in: path, name: setNumber, required: true, schema: { type: integer, minimum: 1, maximum: 4 } }
+      responses:
+        '200': { description: Approval confirmation metadata }
+  /api/v1/coe/sessions/{sessionId}/approve:
+    post:
+      summary: Optimistically lock & freeze selected set with SHA-256 hashes and emit PaperFrozenEvent (COE)
+      parameters:
+        - { in: path, name: sessionId, required: true, schema: { type: integer, format: int64 } }
+      responses:
+        '200': { description: FROZEN session }
+  /api/v1/coe/sessions/{sessionId}/start:
+    post:
+      summary: Transition FROZEN session inside active window to LIVE (COE)
+      parameters:
+        - { in: path, name: sessionId, required: true, schema: { type: integer, format: int64 } }
+      responses:
+        '200': { description: LIVE session }
+  /api/v1/coe/sessions/{sessionId}/stop:
+    post:
+      summary: End active exam session (COE)
+      parameters:
+        - { in: path, name: sessionId, required: true, schema: { type: integer, format: int64 } }
+      responses:
+        '200': { description: ENDED session }
+  /api/v1/coe/sessions/{sessionId}/students:
+    post:
+      summary: Register session roster with checkerboard A-D version assignment and one-time passcodes (COE)
+      parameters:
+        - { in: path, name: sessionId, required: true, schema: { type: integer, format: int64 } }
+      responses:
+        '200': { description: Issued student credentials }
+    get:
+      summary: List roster summary for session (COE)
+      parameters:
+        - { in: path, name: sessionId, required: true, schema: { type: integer, format: int64 } }
+      responses:
+        '200': { description: Roster summary list }
+  /api/v1/coe/sessions/{sessionId}/students/{rollNumber}/accommodation:
+    put:
+      summary: Update accessibility settings (fontScale, highContrast, accommodationExtraMinutes) (COE)
+      parameters:
+        - { in: path, name: sessionId, required: true, schema: { type: integer, format: int64 } }
+        - { in: path, name: rollNumber, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Updated student accommodation }
+  /api/v1/coe/sessions/{sessionId}/students/{rollNumber}/reissue-code:
+    post:
+      summary: Issue fresh one-time passcode for a registered student (COE)
+      parameters:
+        - { in: path, name: sessionId, required: true, schema: { type: integer, format: int64 } }
+        - { in: path, name: rollNumber, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Newly generated single-use code }
+  /api/v1/invigilator/sessions/{sessionId}/monitor:
+    get:
+      summary: Room-scoped live student monitor (ACTIVE, DISCONNECTED, FINISHED counts & server timer) (INVIGILATOR)
+      parameters:
+        - { in: path, name: sessionId, required: true, schema: { type: integer, format: int64 } }
+        - { in: query, name: roomCode, schema: { type: string } }
+      responses:
+        '200': { description: Room monitor snapshot }
+  /api/v1/invigilator/sessions/{sessionId}/students/{rollNumber}/reset-login:
+    post:
+      summary: Release locked session token jti so student can resume on another workstation (INVIGILATOR)
+      parameters:
+        - { in: path, name: sessionId, required: true, schema: { type: integer, format: int64 } }
+        - { in: path, name: rollNumber, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Reset confirmation }
+  /api/v1/invigilator/sessions/{sessionId}/extra-time:
+    post:
+      summary: Grant audited extra time minutes to a room or single student (INVIGILATOR)
+      parameters:
+        - { in: path, name: sessionId, required: true, schema: { type: integer, format: int64 } }
+      responses:
+        '200': { description: Extra time grant persisted }
+  /api/v1/student/public-sessions:
+    get:
+      summary: List currently open exam sessions within window
+      security: []
+      responses:
+        '200': { description: Open session choices }
+  /api/v1/student/login:
+    post:
+      summary: Student login with roll number and one-time access code (window-gated, single-active-session)
+      security: []
+      responses:
+        '200': { description: Signed student token & resume state }
+        '403': { description: Outside scheduled exam window }
+        '409': { description: Active on another workstation or already finished }
+  /api/v1/student/paper:
+    get:
+      summary: Fetch decrypted student version questions (zero MCQ IDs, zero module tags, zero answer keys)
+      security:
+        - StudentJwtAuth: []
+      responses:
+        '200': { description: Sanitized exam paper & previously saved selections }
+  /api/v1/student/responses:
+    post:
+      summary: Idempotent autosave of selected option indices & cursor index
+      security:
+        - StudentJwtAuth: []
+      responses:
+        '200': { description: Server acknowledgement & authoritative clock }
+  /api/v1/student/heartbeat:
+    post:
+      summary: Server clock & extended end-time synchronization poll
+      security:
+        - StudentJwtAuth: []
+      responses:
+        '200': { description: Authoritative server clock & effective end time }
+  /api/v1/student/finish:
+    post:
+      summary: Submit final exam state for this student
+      security:
+        - StudentJwtAuth: []
+      responses:
+        '200': { description: Submission confirmation }
+  /api/v1/admin/subjects:
+    post:
+      summary: Create subject with expected per-module count and marks per question (ADMIN)
+      responses:
+        '200': { description: Created subject }
+  /api/v1/admin/subjects/{subjectId}:
+    put:
+      summary: Update or archive subject (ADMIN)
+      parameters:
+        - { in: path, name: subjectId, required: true, schema: { type: integer, format: int64 } }
+      responses:
+        '200': { description: Updated subject }
+  /api/v1/admin/users:
+    get:
+      summary: List staff accounts (standalone mode only, ADMIN)
+      responses:
+        '200': { description: Staff list }
+    post:
+      summary: Provision HOD, COE, INVIGILATOR, or ADMIN with forced-change temp password (ADMIN)
+      responses:
+        '200': { description: Created user }
+  /api/v1/admin/users/{userId}:
+    put:
+      summary: Enable/disable user or clear brute-force lockout (ADMIN)
+      parameters:
+        - { in: path, name: userId, required: true, schema: { type: integer, format: int64 } }
+      responses:
+        '200': { description: Updated user }
+  /api/v1/admin/health:
+    get:
+      summary: DB latency, free disk, backup age, and 5xx counter snapshot (ADMIN)
+      responses:
+        '200': { description: Health snapshot }
+  /api/v1/admin/audit:
+    get:
+      summary: Query recent tamper-evident hash-chained audit events (ADMIN)
+      responses:
+        '200': { description: Audit log entries }
+  /api/v1/admin/audit/verify:
+    post:
+      summary: Recompute & verify entire SHA-256 HMAC audit hash chain (ADMIN)
+      responses:
+        '200': { description: Verification status }
+  /api/v1/admin/backups:
+    get:
+      summary: List encrypted backups on disk (ADMIN)
+      responses:
+        '200': { description: Backup files metadata }
+    post:
+      summary: Create on-demand AES-256-GCM encrypted backup snapshot (ADMIN)
+      responses:
+        '200': { description: Created backup metadata }
+  /api/v1/admin/backups/{filename}:
+    get:
+      summary: Download encrypted .qbank.enc backup artifact (ADMIN)
+      parameters:
+        - { in: path, name: filename, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Encrypted backup stream }
+  /api/v1/admin/backups/inspect:
+    post:
+      summary: Decrypt & inspect uploaded backup metadata without modifying DB (ADMIN)
+      responses:
+        '200': { description: Backup row counts & SHA-256 }
+  /api/v1/admin/backups/restore:
+    post:
+      summary: Atomically restore all qbank_* tables from uploaded encrypted backup (ADMIN, requires confirm=true)
+      parameters:
+        - { in: query, name: confirm, required: true, schema: { type: boolean } }
+      responses:
+        '200': { description: Restored counts & audit integrity }
+  /api/v1/admin/sessions/{sessionId}/results:
+    get:
+      summary: Deterministic scored results + CSV/XLSX SHA-256 hashes for ENDED session (ADMIN, COE)
+      parameters:
+        - { in: path, name: sessionId, required: true, schema: { type: integer, format: int64 } }
+      responses:
+        '200': { description: Scored results JSON }
+  /api/v1/admin/sessions/{sessionId}/results.csv:
+    get:
+      summary: Download formula-sanitized CSV results with X-Content-SHA256 header (ADMIN, COE)
+      parameters:
+        - { in: path, name: sessionId, required: true, schema: { type: integer, format: int64 } }
+      responses:
+        '200': { description: UTF-8 CSV results }
+  /api/v1/admin/sessions/{sessionId}/results.xlsx:
+    get:
+      summary: Download formula-sanitized Excel results with X-Content-SHA256 header (ADMIN, COE)
+      parameters:
+        - { in: path, name: sessionId, required: true, schema: { type: integer, format: int64 } }
+      responses:
+        '200': { description: XLSX workbook }
+  /api/v1/admin/retention/purge:
+    delete:
+      summary: Purge ended session student responses older than configured retention days (ADMIN)
+      parameters:
+        - { in: query, name: olderThanDays, schema: { type: integer } }
+      responses:
+        '200': { description: Deletion summary }
+  /api/v1/engine/sessions/{sessionId}:
+    get:
+      summary: Machine-to-machine metadata mirror of FrozenPaperProvider (X-QBank-Engine-Token only)
+      security:
+        - EngineServiceToken: []
+      parameters:
+        - { in: path, name: sessionId, required: true, schema: { type: integer, format: int64 } }
+      responses:
+        '200': { description: FrozenPaperMeta }
+        '403': { description: Invalid engine token or outside exam window }
+  /api/v1/engine/sessions/{sessionId}/versions/{versionLabel}:
+    get:
+      summary: Window-gated & SHA-256-verified decrypted exam paper questions (X-QBank-Engine-Token only)
+      security:
+        - EngineServiceToken: []
+      parameters:
+        - { in: path, name: sessionId, required: true, schema: { type: integer, format: int64 } }
+        - { in: path, name: versionLabel, required: true, schema: { type: string, enum: [A, B, C, D] } }
+      responses:
+        '200': { description: FrozenVersionView }
+        '403': { description: Invalid engine token or outside exam window }
+  /api/v1/engine/sessions/{sessionId}/versions/{versionLabel}/key:
+    get:
+      summary: Window-gated & SHA-256-verified answer key (X-QBank-Engine-Token only; NEVER browser accessible)
+      security:
+        - EngineServiceToken: []
+      parameters:
+        - { in: path, name: sessionId, required: true, schema: { type: integer, format: int64 } }
+        - { in: path, name: versionLabel, required: true, schema: { type: string, enum: [A, B, C, D] } }
+      responses:
+        '200': { description: AnswerKeyEntry list }
+        '403': { description: Invalid engine token or outside exam window }

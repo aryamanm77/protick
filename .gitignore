@@ -1,0 +1,13 @@
+target/
+data/
+qbank-data/
+backups/
+secrets/
+certs/
+*.key
+*.p12
+*.jks
+*.enc
+*.log
+.idea/
+*.iml

@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Exam Session Portal</title>
+    <link rel="stylesheet" href="qbank.css">
+</head>
+<body>
+<div id="qb-student-root" class="qb-container">
+    <div class="qb-card" style="max-width:460px;margin:40px auto;">
+        <h2>Candidate Exam Sign-In</h2>
+        <div id="stu-err"></div>
+        <form id="stu-login-form">
+            <div class="qb-field" style="margin-bottom:12px;">
+                <label for="stu-session-id">Exam Session</label>
+                <select id="stu-session-id" required></select>
+            </div>
+            <div class="qb-field" style="margin-bottom:12px;">
+                <label for="stu-roll">Roll Number</label>
+                <input id="stu-roll" type="text" required autocomplete="off">
+            </div>
+            <div class="qb-field" style="margin-bottom:16px;">
+                <label for="stu-code">One-Time Access Code</label>
+                <input id="stu-code" type="password" required autocomplete="off">
+            </div>
+            <button class="btn btn-primary" type="submit" style="width:100%;">Start Exam</button>
+        </form>
+    </div>
+</div>
+
+<script src="qbank-api.js"></script>
+<script src="qbank-student-view.js"></script>
+<script>
+(function () {
+    'use strict';
+    var sel = document.getElementById('stu-session-id');
+    var errBox = document.getElementById('stu-err');
+    var root = document.getElementById('qb-student-root');
+    var STUDENT_TOKEN_KEY = 'qbank_student_jwt';
+
+    async function loadActiveSessions() {
+        try {
+            var list = await window.QBankApi.request('/student/public-sessions', { bearerToken: null });
+            sel.textContent = '';
+            if (!list || list.length === 0) {
+                var opt = document.createElement('option');
+                opt.value = '';
+                opt.textContent = 'No open exam session available';
+                sel.appendChild(opt);
+                return;
+            }
+            list.forEach(function (s) {
+                var opt = document.createElement('option');
+                opt.value = String(s.sessionId);
+                opt.textContent = s.subjectCode + ' — ' + s.title + ' (' + s.slot + ')';
+                sel.appendChild(opt);
+            });
+        } catch (e) {
+            showErr(e.message);
+        }
+    }
+
+    function showErr(msg) {
+        errBox.textContent = '';
+        if (!msg) return;
+        var div = document.createElement('div');
+        div.className = 'qb-alert qb-alert-err';
+        div.textContent = msg;
+        errBox.appendChild(div);
+    }
+
+    document.getElementById('stu-login-form').addEventListener('submit', async function (ev) {
+        ev.preventDefault();
+        showErr('');
+        var sessionId = Number(sel.value);
+        var rollNumber = document.getElementById('stu-roll').value.trim();
+        var accessCode = document.getElementById('stu-code').value.trim();
+        if (!sessionId) { showErr('Please choose an active exam session'); return; }
+
+        try {
+            var auth = await window.QBankApi.request('/student/login', {
+                method: 'POST',
+                bearerToken: null,
+                json: { sessionId: sessionId, rollNumber: rollNumber, accessCode: accessCode }
+            });
+            window.sessionStorage.setItem(STUDENT_TOKEN_KEY, auth.signedToken);
+            var paper = await window.QBankApi.request('/student/paper', {
+                bearerToken: auth.signedToken
+            });
+            root.className = '';
+            window.QBankStudentView.mount(root, {
+                basePath: window.QBankApi.basePath,
+                studentToken: auth.signedToken,
+                paperPayload: paper,
+                onFinish: function () {
+                    window.sessionStorage.removeItem(STUDENT_TOKEN_KEY);
+                }
+            });
+        } catch (e) {
+            showErr(e.message);
+        }
+    });
+
+    loadActiveSessions();
+})();
+</script>
+</body>
+</html>
